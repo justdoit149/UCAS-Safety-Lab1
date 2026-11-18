@@ -1,6 +1,6 @@
 # 1A 网络嗅探器 / 协议分析器
 
-当前进度：**M1 抓包骨架**。本阶段只验证 Npcap 抓包、网卡枚举和原始帧计数；协议解析、三栏界面、过滤与流追踪在后续里程碑实现。
+当前进度：**M2 协议解析与三栏界面**。已支持以太网/VLAN/Windows 回环/裸 IP 链路层适配，IPv4、IPv6、ARP、TCP、UDP、ICMP/ICMPv6 解析，以及包列表、协议字段树和十六进制高亮联动；过滤、应用层协议识别、统计和 TCP 流追踪在后续里程碑实现。
 
 ## 环境
 
@@ -23,4 +23,4 @@ python main.py
 python -m unittest discover -s tests -v
 ```
 
-测试会枚举网卡，并在回环网卡上发一段本地 TCP 流量，验证能读到原始帧和驱动统计。
+测试包含两部分：`test_pcap_driver.py` 枚举网卡并在回环上发本地 TCP 流量，验证原始帧和驱动统计；`test_dissector.py` 用构造帧和随机畸形帧验证 IPv4/IPv6/ARP/TCP/UDP/ICMP、VLAN、回环链路类型及字段偏移。

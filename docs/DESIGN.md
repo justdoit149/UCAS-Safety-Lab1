@@ -436,7 +436,7 @@ proto   := "tcp" | "udp" | "icmp" | "icmp6" | "ip" | "ipv4"
 
 - 包列表用 `QAbstractTableModel` + `QSortFilterProxyModel`；批量插入用 `beginInsertRows/endInsertRows`。
 - 字段树用 `QTreeWidget`，双击字段联动十六进制高亮；选中包时重建树。
-- 十六进制视图自绘：偏移列、16 字节十六进制、ASCII；高亮当前字段区间。
+- 十六进制视图用只读 `QPlainTextEdit`：偏移列、16 字节十六进制、ASCII；记录每个字节在文档中的字符位置，用 `ExtraSelections` 同时高亮十六进制区和 ASCII 区。这样保留原生滚动/选中能力，也避免自绘控件的滚动条细节。
 - 流表列：协议、源、目的、状态、包数、字节、时长、进程、应用。
 - 流表选中一条流时，右侧显示流时序表（§8.3）；双击流或进程沿用「筛出该流/该进程全部 TCP 流」的逻辑。
 - 包列表提供可选「进程」列（默认隐藏），便于录屏时直接展示某条流属于哪个进程。
