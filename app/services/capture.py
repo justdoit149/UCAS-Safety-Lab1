@@ -11,6 +11,7 @@ import time
 
 from PySide6.QtCore import QThread, Signal
 
+from app.core.app_protocols import ApplicationContext
 from app.core.dissector import dissect
 from app.core.models import Packet
 from app.core.pcap_driver import NpcapNotFoundError, PcapError, PcapHandle
@@ -41,6 +42,7 @@ class CaptureWorker(QThread):
         self.promisc = promisc
         self.capture_filter = (capture_filter or "").strip()
         self.captured = 0
+        self._app_context = ApplicationContext()
         self._stop_event = threading.Event()
 
     def stop(self) -> None:
@@ -89,6 +91,7 @@ class CaptureWorker(QThread):
                             raw,
                             orig_len,
                             handle.datalink,
+                            self._app_context,
                         )
                     except Exception as exc:  # pragma: no cover - defensive
                         packet = Packet(

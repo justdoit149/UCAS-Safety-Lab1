@@ -117,15 +117,16 @@
 │   │   ├── __init__.py
 │   │   ├── pcap_driver.py     # ctypes 封装
 │   │   ├── models.py          # Packet/Field/Layer/Flow 数据类
-│   │   ├── dissector.py       # 协议解析
-│   │   └── pcap_io.py         # pcap 文件读写
+│   │   ├── dissector.py       # 链路/网络/传输层解析
+│   │   ├── app_protocols.py   # HTTP/DNS/TLS 识别与应用层字段
+│   │   ├── filtering.py       # BPF 抓包过滤与显示过滤表达式
+│   │   └── pcap_io.py         # pcap 文件读写（M5）
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── capture.py         # CaptureWorker
-│   │   ├── display_filter.py  # 显示过滤表达式
-│   │   ├── flows.py           # FlowManager
-│   │   ├── process_map.py     # 进程映射
-│   │   └── stats.py           # 统计
+│   │   ├── flows.py           # FlowManager（M6）
+│   │   ├── process_map.py     # 进程映射（M6）
+│   │   └── stats.py           # 统计（M5）
 │   └── ui/
 │       ├── __init__.py
 │       ├── main_window.py

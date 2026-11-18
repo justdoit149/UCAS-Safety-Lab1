@@ -56,7 +56,7 @@ _DATALINK_NAMES = {
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("1A 网络嗅探器 - M3 过滤")
+        self.setWindowTitle("1A 网络嗅探器 - M4 应用层识别")
         self.resize(1280, 860)
 
         self._worker: CaptureWorker | None = None

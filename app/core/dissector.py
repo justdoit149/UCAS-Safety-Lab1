@@ -1,14 +1,15 @@
-"""Link-layer and network/transport dissector.
+"""Link-layer, network/transport and application dissector.
 
 The dissector is intentionally dependency-free and defensive: every read is
 bounds-checked, so a truncated or malicious frame produces a partial packet
-instead of an exception.  Application protocols are handled in M4.
+instead of an exception.  HTTP, DNS and TLS are detected in M4.
 """
 
 from __future__ import annotations
 
 import socket
 
+from app.core.app_protocols import ApplicationContext, dissect_application
 from app.core.models import Field, Layer, Packet
 
 # libpcap link-layer types
@@ -143,10 +144,13 @@ def dissect(
     raw: bytes,
     orig_len: int,
     linktype: int,
+    app_context: ApplicationContext | None = None,
 ) -> Packet:
     """Dissect one captured frame.
 
     ``index`` is the 1-based packet number within the capture session.
+    ``app_context`` optionally remembers the application protocol of a flow
+    so later segments without a signature still display as HTTP/TLS/DNS.
     """
     raw = bytes(raw)
     packet = Packet(
@@ -198,8 +202,40 @@ def dissect(
         packet.proto_label = f"EtherType {_hex(ethertype, 4)}"
         packet.summary = f"{_hex(ethertype, 4)}  {length} bytes"
 
+    _dissect_application(packet, raw, app_context)
     _finish(packet)
     return packet
+
+
+def _dissect_application(
+    packet: Packet,
+    raw: bytes,
+    context: ApplicationContext | None,
+) -> None:
+    """Pass a TCP/UDP payload to the application layer, if there is one."""
+    if packet.transport not in ("TCP", "UDP"):
+        return
+    transport_layer = next(
+        (layer for layer in reversed(packet.layers)
+         if layer.name in ("TCP", "UDP")),
+        None,
+    )
+    if transport_layer is None:
+        return
+    payload_field = next(
+        (field for field in reversed(transport_layer.fields)
+         if field.name in ("TCP payload", "UDP payload")),
+        None,
+    )
+    if payload_field is None or payload_field.length <= 0:
+        return
+    dissect_application(
+        packet,
+        raw,
+        payload_field.offset,
+        payload_field.length,
+        context,
+    )
 
 
 def _finish(packet: Packet) -> None:

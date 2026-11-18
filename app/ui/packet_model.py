@@ -33,6 +33,9 @@ _PROTOCOL_COLORS = {
     "ARP": "#6a1b9a",
     "IPv4": "#455a64",
     "IPv6": "#455a64",
+    "HTTP": "#00695c",
+    "DNS": "#ad1457",
+    "TLS": "#5e35b1",
 }
 
 

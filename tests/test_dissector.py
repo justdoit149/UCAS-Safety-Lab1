@@ -99,7 +99,7 @@ def all_fields(fields: list[Field]):
 
 class DissectorTest(unittest.TestCase):
     def test_ethernet_ipv4_tcp(self) -> None:
-        payload = b"GET / HTTP/1.1\r\n\r\n"
+        payload = b"data"
         raw = (
             eth_header()
             + ipv4_header(6, 20 + len(payload))
