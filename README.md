@@ -1,12 +1,13 @@
 # 1A 网络嗅探器 / 协议分析器
 
-当前进度：**M6 流跟踪与进程映射**。在 M5 的文件与统计基础上，已加入 TCP/UDP 双向归流、TCP 状态机、流表与流时序视图、基于 `psutil` 的本地进程映射，以及「某进程的全部 TCP 流」筛选。流表可查看每条流的包数、字节、时长、应用协议、状态和进程；选中流后可把包列表过滤到该流，或在右侧按时序查看握手、请求、响应与挥手。M7 将实现 Wireshark Lua 二次开发。
+当前进度：**M7 Wireshark Lua 二次开发**。在 M6 的流跟踪与进程映射基础上，已实现自定义 LAB1A 协议解析器、专家信息、着色规则、按 `tcp.stream` 的流统计菜单，以及供 tshark 使用的命令行统计脚本。插件目标环境为 Wireshark 4.6.9 / Lua 5.4。
 
 ## 环境
 
 - Windows 10/11
 - Python 3.11
 - Npcap 1.90（安装时勾选 WinPcap 兼容模式）
+- Wireshark 4.6.9（仅 M7 插件验收需要，可选）
 - `pip install -r requirements.txt`
 
 ## 运行
@@ -16,6 +17,15 @@ python main.py
 ```
 
 或双击 `run.bat`。
+
+## M7 Wireshark 二次开发
+
+- `wireshark/lab1a.lua`：注册 TCP/UDP 9999 的 `LAB1A` 协议，解析魔数 `L1A1`、版本、消息类型（请求/应答/心跳）、序号、载荷长度和载荷；字段 `lab1a.magic`、`lab1a.version`、`lab1a.msg_type`、`lab1a.seq`、`lab1a.length`、`lab1a.payload` 可直接用于显示过滤。
+- 专家信息：魔数错误、头部过短、长度与声明不符标为 error；未知版本、未知消息类型、尾部多余数据标为 warning。
+- 着色规则：`wireshark/lab1a_colorfilters` 按请求/应答/心跳给包列表着色。
+- 流统计：GUI `Tools -> LAB1A -> 流统计` 按 `tcp.stream` 汇总包数、字节数、首末时间和消息类型计数；无 GUI 时用 `wireshark/lab1a_stats.lua` 配合 tshark 输出同样的表。
+- 演示：`tools/lab1a_demo.py` 在回环 9999 端口生成请求/应答/心跳；`tools/make_lab1a_pcap.py` 生成可重复的离线 pcap（含畸形报文）。
+- 安装与 tshark 验收命令见 `wireshark/README.md`，也可运行 `wireshark/install.bat` 安装插件。
 
 ## M6 流跟踪与进程映射
 
@@ -40,4 +50,4 @@ python main.py
 python -m unittest discover -s tests -v
 ```
 
-测试包含八部分：`test_pcap_driver.py` 枚举网卡、在回环上发本地流量并验证 BPF 过滤；`test_dissector.py` 用构造帧和随机畸形帧验证 IPv4/IPv6/ARP/TCP/UDP/ICMP、VLAN、回环链路类型及字段偏移；`test_filtering.py` 覆盖显示过滤语法、优先级、别名、端口/IP 条件和错误位置；`test_app_protocols.py` 覆盖 HTTP/DNS/TLS 的识别、字段、压缩指针、TCP 长度前缀、SNI/ALPN/supported_versions、GREASE 过滤和畸形载荷；`test_pcap_io.py` 覆盖 pcap 往返、大小端/纳秒时间戳、截断文件、混合 linktype 和缓存上限；`test_stats.py` 覆盖协议计数、字节数、速率分桶与滑动窗口；`test_flows.py` 覆盖双向归并、IPv6 规范化、TCP 状态机、UDP 过期、进程筛选与映射保留；`test_process_map.py` 用伪造连接验证 ESTABLISHED 优先、IPv6 压缩、权限异常回退和进程名缓存。
+测试包含九部分：`test_pcap_driver.py` 枚举网卡、在回环上发本地流量并验证 BPF 过滤；`test_dissector.py` 用构造帧和随机畸形帧验证 IPv4/IPv6/ARP/TCP/UDP/ICMP、VLAN、回环链路类型及字段偏移；`test_filtering.py` 覆盖显示过滤语法、优先级、别名、端口/IP 条件和错误位置；`test_app_protocols.py` 覆盖 HTTP/DNS/TLS 的识别、字段、压缩指针、TCP 长度前缀、SNI/ALPN/supported_versions、GREASE 过滤和畸形载荷；`test_pcap_io.py` 覆盖 pcap 往返、大小端/纳秒时间戳、截断文件、混合 linktype 和缓存上限；`test_stats.py` 覆盖协议计数、字节数、速率分桶与滑动窗口；`test_flows.py` 覆盖双向归并、IPv6 规范化、TCP 状态机、UDP 过期、进程筛选与映射保留；`test_process_map.py` 用伪造连接验证 ESTABLISHED 优先、IPv6 压缩、权限异常回退和进程名缓存；`test_wireshark_plugin.py` 用 tshark 验证 LAB1A 协议树、显示过滤、专家信息和流统计脚本（未安装 tshark 时自动跳过）。

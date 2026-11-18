@@ -106,11 +106,14 @@
 ├── docs/
 │   └── DESIGN.md
 ├── wireshark/
-│   ├── lab1a.lua
-│   ├── lab1a_stats.lua
+│   ├── lab1a.lua              # 自定义协议、专家信息、GUI 流统计
+│   ├── lab1a_stats.lua        # tshark 流统计脚本
+│   ├── lab1a_colorfilters     # 请求/应答/心跳着色规则
+│   ├── install.bat            # 安装到个人插件目录
 │   └── README.md
 ├── tools/
-│   └── lab1a_demo.py
+│   ├── lab1a_demo.py          # 回环实时演示流量
+│   └── make_lab1a_pcap.py     # 可重复的离线 pcap
 ├── app/
 │   ├── __init__.py
 │   ├── core/
@@ -146,7 +149,8 @@
     ├── test_pcap_driver.py
     ├── test_pcap_io.py
     ├── test_process_map.py
-    └── test_stats.py
+    ├── test_stats.py
+    └── test_wireshark_plugin.py
 ```
 
 ## 4. 数据模型
@@ -480,7 +484,7 @@ proto   := "tcp" | "udp" | "icmp" | "icmp6" | "ip" | "ipv4"
 | 基本-能力 | M4 | HTTP/DNS/TLS 识别与字段解析 | 回环 HTTP 请求可读；DNS 查询/应答可读；HTTPS ClientHello 能取到 SNI 与 TLS 版本 |
 | NPA-完善 | M5 | pcap 保存/打开、统计图表、性能与内存上限 | 保存文件可用 Wireshark 打开且包数一致；打开后解析一致；1000+ 包/秒 UI 可用 |
 | 加分 | M6 | TCP/UDP 归流、流表、TCP 状态、进程映射、流时序视图 | 双向包归入同一流；状态随握手/挥手变化；流表显示进程名；回环流显示收发两个进程；可按进程筛选全部 TCP 流；选中流可看时序 |
-| 加分 | M7 | Wireshark Lua 插件 | 插件在 Wireshark 中加载并生效（tshark 可输出自定义字段） |
+| 加分 | M7 | Wireshark Lua 插件 | 插件在 Wireshark 中加载并生效；tshark 可输出自定义字段；专家信息可过滤；包列表按消息类型着色；GUI/命令行流统计输出正确 |
 | 交付 | M8 | PyInstaller 打包、报告定稿、视频脚本、GitHub 推送、ZIP 打包 | 打包程序在无 Python 环境可运行（需 Npcap）；报告为 docx/pdf 且含 Git 链接；视频脚本与检查项齐全；ZIP 命名/结构符合 PPT |
 
 每个里程碑完成后：运行对应测试 → 更新设计文档/变更记录 → 单独 commit，提交信息写清功能范围。每个阶段只写当前里程碑的代码，不提前生成后续模块。
@@ -518,23 +522,29 @@ proto   := "tcp" | "udp" | "icmp" | "icmp6" | "ip" | "ipv4"
 
 功能设计：
 
-1. 自定义协议 `LAB1A`，注册在 TCP/UDP 9999 端口：解析魔数 `L1A1`、版本、消息类型（1=请求、2=应答、3=心跳）、序号、载荷长度、载荷。字段注册为 `lab1a.magic`、`lab1a.version`、`lab1a.msg_type`、`lab1a.seq`、`lab1a.payload`，支持 `lab1a.msg_type == 1` 这类显示过滤。
-2. 专家信息：长度与头部声明不符、未知消息类型、魔数错误分别标记 error/warning，演示自定义校验。
-3. 着色规则：按消息类型给包列表着色（请求/应答/心跳三种颜色）。
-4. 流统计：注册菜单动作（若当前 Lua API 不支持菜单，则提供等价的 `wireshark/lab1a_stats.lua` 命令行脚本），遍历当前显示包，按 `tcp.stream` 汇总每条 TCP 流的包数、字节数、首末时间并输出。
-5. 可选联动：读取本实验导出的 `flows.csv`（五元组 + 进程名），把 `tcp.stream` 映射到进程名，增加一列 `lab1a.process`。
+1. 自定义协议 `LAB1A`，注册在 TCP/UDP 9999 端口：解析魔数 `L1A1`、版本、消息类型（1=请求、2=应答、3=心跳）、序号、载荷长度、载荷。字段注册为 `lab1a.magic`、`lab1a.version`、`lab1a.msg_type`、`lab1a.seq`、`lab1a.length`、`lab1a.payload`，支持 `lab1a.msg_type == 1` 这类显示过滤。
+2. 专家信息：魔数错误、头部不足 10 字节、声明长度大于实际载荷标记为 error；未知版本、未知消息类型、声明长度小于实际载荷（尾部多余数据）标记为 warning。专家字段可过滤，如 `lab1a.bad_magic`。
+3. 着色规则：`wireshark/lab1a_colorfilters` 按请求/应答/心跳三种消息类型着色，通过 Wireshark 的 Coloring Rules 导入；实测协议树会显示 `[Coloring Rule Name: LAB1A 请求]`。
+4. 流统计：`lab1a.lua` 注册 `Tools -> LAB1A -> 流统计` 菜单，用 `Listener` + `Field` 遍历当前捕获，按 `tcp.stream` 汇总包数、字节数、首末时间以及请求/应答/心跳/其他计数，显示在 `TextWindow` 中；`wireshark/lab1a_stats.lua` 是等价的 tshark 命令行入口。
+5. 可选联动未纳入本次验收：主程序的流键与 Wireshark 的 `tcp.stream` 编号口径不同，直接把 `flows.csv` 映射到 `tcp.stream` 容易造成误导；进程信息仍由主程序流表展示。
+6. 自动化验收：`tests/test_wireshark_plugin.py` 生成临时 pcap，检查协议树、`lab1a.msg_type == 1` 过滤、四类专家信息和 `lab1a_stats.lua` 汇总结果；未安装 tshark 时跳过。
 
 配套：
 
 - `tools/lab1a_demo.py`：起 TCP 服务并发送符合上述格式的请求/应答/心跳，供抓包和录屏。
+- `tools/make_lab1a_pcap.py`：生成可重复的离线 pcap，包含两条 TCP 流、UDP 报文和四类畸形报文，供测试和截图。
+- `wireshark/lab1a_colorfilters`：三种消息类型的着色规则，GUI 中通过 Coloring Rules 导入。
+- `wireshark/install.bat`：把 `lab1a.lua` 复制到 `%APPDATA%\Wireshark\plugins\`，并提示着色规则导入位置。
 - `wireshark/README.md`：安装路径、启用方法、tshark 验收命令。
-- 插件只用 Wireshark 内置 `Proto`、`ProtoField`、`Tvb`、`TvbRange`、`register_menu` 等 API，不依赖第三方 Lua 库。
+- 插件只用 Wireshark 内置 `Proto`、`ProtoField`、`ProtoExpert`、`Tvb`、`TvbRange`、`Listener`、`Field`、`TextWindow`、`register_menu` 等 API，不依赖第三方 Lua 库。
 
 验收：
 
 - `tshark -X lua_script:wireshark/lab1a.lua -r demo.pcap -V` 能看到 `LAB1A` 协议树和字段。
 - `tshark ... -T fields -e lab1a.msg_type -e lab1a.seq` 能输出解析结果。
-- GUI 中能看到协议列、着色和统计结果；截图与命令输出写进报告。
+- `tshark ... -Y 'lab1a.msg_type == 1'` 与四类专家字段过滤结果正确。
+- `tshark -X lua_script:wireshark/lab1a_stats.lua ...` 输出每条 `tcp.stream` 的包数、字节数、首末时间和消息类型计数。
+- GUI 中能看到 `LAB1A` 协议列、请求/应答/心跳三种底色，以及 `Tools -> LAB1A -> 流统计` 菜单；截图与命令输出写进报告。
 
 ## 16. 已知取舍与风险
 

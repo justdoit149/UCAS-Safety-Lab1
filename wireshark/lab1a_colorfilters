@@ -1,0 +1,10 @@
+# LAB1A coloring rules for Wireshark 4.x.
+#
+# Import with: View -> Coloring Rules... -> Import, or append these lines to
+# %APPDATA%\Wireshark\colorfilters (do not overwrite an existing file).
+# Format: @name@display filter@[background R,G,B][foreground R,G,B]
+# RGB components are 16-bit values (0..65535).
+
+@LAB1A 请求@lab1a.msg_type == 1@[57568,62194,65535][3341,18247,41377]
+@LAB1A 应答@lab1a.msg_type == 2@[59624,62965,59881][6939,24158,8224]
+@LAB1A 心跳@lab1a.msg_type == 3@[65535,63736,57825][59110,20817,0]
