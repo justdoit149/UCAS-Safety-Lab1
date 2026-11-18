@@ -1,6 +1,6 @@
 # 1A 网络嗅探器 / 协议分析器
 
-当前进度：**M5 文件与统计**。在 M4 的 HTTP/DNS/TLS 识别基础上，已加入经典 pcap 保存/打开、协议分布与包速率图表，以及 200,000 包缓存上限。保存支持全部包和当前显示过滤结果，写出标准 pcap，可直接用 Wireshark 打开；打开文件时复用同一套解析和显示过滤逻辑，标题显示文件名并进入离线状态。TCP/UDP 归流、进程映射和流时序视图在 M6 实现。
+当前进度：**M6 流跟踪与进程映射**。在 M5 的文件与统计基础上，已加入 TCP/UDP 双向归流、TCP 状态机、流表与流时序视图、基于 `psutil` 的本地进程映射，以及「某进程的全部 TCP 流」筛选。流表可查看每条流的包数、字节、时长、应用协议、状态和进程；选中流后可把包列表过滤到该流，或在右侧按时序查看握手、请求、响应与挥手。M7 将实现 Wireshark Lua 二次开发。
 
 ## 环境
 
@@ -17,6 +17,16 @@ python main.py
 
 或双击 `run.bat`。
 
+## M6 流跟踪与进程映射
+
+- 底部 `[流表]`：TCP/UDP 按规范化五元组双向归并；TCP 状态从 SYN / SYN+ACK / ACK / FIN / RST 推导，UDP 空闲 120 秒标记过期。
+- 流表列：协议、源、目的、状态、包数、字节、时长、应用、进程、最后活动；默认按最后活动倒序，可点表头排序。
+- 选中流后，右侧显示该流的包时序（序号、相对时间、A→B/B→A、TCP 标志、长度、摘要）；双击时序行跳到包列表并高亮。
+- 「显示所选流数据包」把包列表过滤到选中流；清除显示过滤恢复全部。
+- 「按进程筛选 TCP」下拉框列出当前 TCP 流涉及的进程，选中后只显示该 PID 的全部 TCP 流；「刷新进程」手动更新 `psutil` 快照。
+- 抓包期间每 3 秒自动刷新进程映射；普通用户可能读不到部分系统进程，界面显示 `-` 并保留错误提示。
+- 包列表可选显示「进程」列（默认隐藏）；先查源端点、再查目的端点，请求与响应都能显示本地进程。
+
 ## M5 文件与统计
 
 - 「打开 pcap」读取经典 pcap（支持大小端、微秒/纳秒时间戳）；标题显示文件名，底部状态栏进入离线状态。
@@ -30,4 +40,4 @@ python main.py
 python -m unittest discover -s tests -v
 ```
 
-测试包含六部分：`test_pcap_driver.py` 枚举网卡、在回环上发本地流量并验证 BPF 过滤；`test_dissector.py` 用构造帧和随机畸形帧验证 IPv4/IPv6/ARP/TCP/UDP/ICMP、VLAN、回环链路类型及字段偏移；`test_filtering.py` 覆盖显示过滤语法、优先级、别名、端口/IP 条件和错误位置；`test_app_protocols.py` 覆盖 HTTP/DNS/TLS 的识别、字段、压缩指针、TCP 长度前缀、SNI/ALPN/supported_versions、GREASE 过滤和畸形载荷；`test_pcap_io.py` 覆盖 pcap 往返、大小端/纳秒时间戳、截断文件、混合 linktype 和缓存上限；`test_stats.py` 覆盖协议计数、字节数、速率分桶与滑动窗口。
+测试包含八部分：`test_pcap_driver.py` 枚举网卡、在回环上发本地流量并验证 BPF 过滤；`test_dissector.py` 用构造帧和随机畸形帧验证 IPv4/IPv6/ARP/TCP/UDP/ICMP、VLAN、回环链路类型及字段偏移；`test_filtering.py` 覆盖显示过滤语法、优先级、别名、端口/IP 条件和错误位置；`test_app_protocols.py` 覆盖 HTTP/DNS/TLS 的识别、字段、压缩指针、TCP 长度前缀、SNI/ALPN/supported_versions、GREASE 过滤和畸形载荷；`test_pcap_io.py` 覆盖 pcap 往返、大小端/纳秒时间戳、截断文件、混合 linktype 和缓存上限；`test_stats.py` 覆盖协议计数、字节数、速率分桶与滑动窗口；`test_flows.py` 覆盖双向归并、IPv6 规范化、TCP 状态机、UDP 过期、进程筛选与映射保留；`test_process_map.py` 用伪造连接验证 ESTABLISHED 优先、IPv6 压缩、权限异常回退和进程名缓存。

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QModelIndex, Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from app.core.app_protocols import ApplicationContext
 from app.core.dissector import dissect
+from app.core.flowkey import endpoint_text
 from app.core.models import Packet
 from app.core.filtering import (
     CAPTURE_FILTER_PRESETS,
@@ -48,12 +49,16 @@ from app.core.pcap_io import (
     write_pcap,
 )
 from app.services.capture import CaptureWorker
+from app.services.flows import FlowManager
+from app.services.process_map import ProcessMap
 from app.services.stats import CaptureStats
 from app.ui.detail_view import DetailView
+from app.ui.flow_view import FlowView
 from app.ui.hex_view import HexView
 from app.ui.packet_model import (
     COL_INFO,
     COL_NO,
+    COL_PROCESS,
     COL_TIME,
     PacketFilterProxyModel,
     PacketTableModel,
@@ -61,7 +66,7 @@ from app.ui.packet_model import (
 )
 from app.ui.stats_view import StatsView
 
-_BASE_TITLE = "1A 网络嗅探器 - M5 文件与统计"
+_BASE_TITLE = "1A 网络嗅探器 - M6 流跟踪与进程映射"
 
 _DATALINK_NAMES = {
     0: "DLT_NULL（回环）",
@@ -84,6 +89,17 @@ class MainWindow(QMainWindow):
         self.max_packets = 200_000
         self._limit_warned = False
         self.stats = CaptureStats()
+        self.flow_manager = FlowManager()
+        self.process_map = ProcessMap()
+        self._flow_dirty = False
+
+        self._flow_timer = QTimer(self)
+        self._flow_timer.setSingleShot(True)
+        self._flow_timer.setInterval(250)
+        self._flow_timer.timeout.connect(self._refresh_flow_table)
+        self._process_timer = QTimer(self)
+        self._process_timer.setInterval(3000)
+        self._process_timer.timeout.connect(self._refresh_process_map)
 
         self._build_ui()
         self._load_devices()
@@ -200,6 +216,8 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(3, 170)  # destination
         self.table.setColumnWidth(4, 78)   # protocol
         self.table.setColumnWidth(5, 64)   # length
+        self.table.setColumnWidth(COL_PROCESS, 170)
+        self.table.setColumnHidden(COL_PROCESS, True)
         self._splitters.addWidget(self.table)
 
         bottom = QSplitter(Qt.Horizontal)
@@ -247,9 +265,12 @@ class MainWindow(QMainWindow):
 
         self.stats_view = StatsView()
         self.bottom_tabs.addTab(self.stats_view, "统计图表")
-        self.bottom_tabs.setMaximumHeight(250)
+        self.flow_view = FlowView()
+        self.bottom_tabs.addTab(self.flow_view, "流表")
+        self.bottom_tabs.setMaximumHeight(300)
         root.addWidget(self.bottom_tabs)
 
+        self.model.set_process_map(self.process_map)
         self.setCentralWidget(central)
         self.statusBar().showMessage("正在检测 Npcap...")
 
@@ -269,6 +290,17 @@ class MainWindow(QMainWindow):
         self.table.selectionModel().currentRowChanged.connect(
             self._on_current_row_changed
         )
+        self.flow_view.refresh_processes_requested.connect(
+            self._refresh_process_map
+        )
+        self.flow_view.show_flow_packets_requested.connect(
+            self._show_flow_packets
+        )
+        self.flow_view.packet_activated.connect(self._jump_to_packet)
+        self.flow_view.process_column_toggled.connect(
+            self._on_process_column_toggled
+        )
+        self.bottom_tabs.currentChanged.connect(self._on_bottom_tab_changed)
 
     # ------------------------------------------------------------- devices
     @staticmethod
@@ -390,6 +422,10 @@ class MainWindow(QMainWindow):
         self.btn_clear.setEnabled(False)
         self.stats.reset()
         self.stats_view.update_stats(self.stats)
+        self.flow_manager.clear()
+        self.flow_view.clear()
+        self._flow_dirty = False
+        self._flow_timer.stop()
         self._limit_warned = False
         self.lbl_limit_notice.clear()
         self.lbl_limit_notice.setVisible(False)
@@ -452,6 +488,11 @@ class MainWindow(QMainWindow):
         self.model.append_packets(packets)
         self.stats.add_packets(packets)
         self.stats_view.update_stats(self.stats)
+        self.flow_manager.add_packets(packets)
+        if packets:
+            self._refresh_process_map()
+        self._flow_dirty = True
+        self._refresh_flow_table()
         self.captured_count = len(packets)
         self._update_counters(len(packets), 0, 0, 0)
         self.lbl_rows.setText(str(self.model.rowCount()))
@@ -544,6 +585,111 @@ class MainWindow(QMainWindow):
         self.btn_save_all.setEnabled(has_packets and not active)
         self.btn_save_visible.setEnabled(has_packets and not active)
 
+    # ---------------------------------------------------------------- flows
+    def _schedule_flow_refresh(self) -> None:
+        self._flow_dirty = True
+        if (
+            self.bottom_tabs.currentWidget() is self.flow_view
+            and not self._flow_timer.isActive()
+        ):
+            self._flow_timer.start()
+
+    def _refresh_flow_table(self) -> None:
+        if not self._flow_dirty:
+            return
+        self._flow_dirty = False
+        self.flow_view.set_flows(self.flow_manager.flows_sorted())
+
+    def _on_bottom_tab_changed(self, index: int) -> None:
+        if self.bottom_tabs.widget(index) is not self.flow_view:
+            return
+        if self._flow_dirty:
+            self._refresh_flow_table()
+        if (
+            self.flow_manager.flows
+            and self.process_map.last_refresh_ts == 0.0
+        ):
+            self._refresh_process_map()
+
+    def _refresh_process_map(self) -> None:
+        count = self.process_map.refresh()
+        self.flow_manager.apply_process_map(self.process_map)
+        self.flow_view.update_processes()
+        if not self.table.isColumnHidden(COL_PROCESS):
+            self.model.refresh_process_column()
+        if self.process_map.last_error:
+            self.flow_view.set_process_status(
+                f"进程映射: {self.process_map.last_error}", error=True
+            )
+            return
+        stamp = datetime.now().strftime("%H:%M:%S")
+        if count:
+            self.flow_view.set_process_status(
+                f"进程映射: {count} 个 TCP 端点 | 更新 {stamp}"
+            )
+        else:
+            self.flow_view.set_process_status(
+                "进程映射: 未找到 TCP 连接（可尝试以管理员身份运行）"
+                f" | 更新 {stamp}"
+            )
+
+    def _on_process_column_toggled(self, visible: bool) -> None:
+        self.table.setColumnHidden(COL_PROCESS, not visible)
+        if visible:
+            self.table.setColumnWidth(COL_PROCESS, 170)
+            self.model.refresh_process_column()
+
+    def _show_flow_packets(self, flow) -> None:
+        if flow is None:
+            return
+        if self.edit_display_filter.text().strip():
+            self.clear_display_filter()
+        key = flow.key
+        self.proxy.set_packet_filter(lambda packet: packet.flow_key == key)
+        self.table.sortByColumn(COL_NO, Qt.AscendingOrder)
+        self.table.clearSelection()
+        self.detail.clear_packet()
+        self.hex_view.set_packet(None)
+        self._update_visible_count()
+        if flow.packets:
+            self._select_packet_index(flow.packets[0].index)
+        self.statusBar().showMessage(
+            f"显示所选流 {flow.protocol} "
+            f"{endpoint_text(flow.src_ip, flow.src_port)} ↔ "
+            f"{endpoint_text(flow.dst_ip, flow.dst_port)} | "
+            f"{self.proxy.rowCount()} 包（点“清除”恢复全部）"
+        )
+
+    def _jump_to_packet(self, packet_index: int) -> None:
+        if not self._select_packet_index(packet_index):
+            self.statusBar().showMessage(
+                f"无法定位包 #{packet_index}，可能已被缓存上限截断"
+            )
+
+    def _select_packet_index(self, packet_index: int) -> bool:
+        source_row = None
+        for row, packet in enumerate(self.model.packets):
+            if packet.index == packet_index:
+                source_row = row
+                break
+        if source_row is None:
+            return False
+
+        source = self.model.index(source_row, 0)
+        proxy = self.proxy.mapFromSource(source)
+        if not proxy.isValid():
+            self.clear_display_filter()
+            proxy = self.proxy.mapFromSource(source)
+        if not proxy.isValid():
+            return False
+        self.table.selectRow(proxy.row())
+        self.table.scrollTo(proxy, QAbstractItemView.PositionAtCenter)
+        self.table.setFocus()
+        # selectRow() does not emit currentRowChanged when the row is already
+        # current, and callers clear the detail panes before filtering.
+        self._on_current_row_changed(self.table.currentIndex(), None)
+        return True
+
     # -------------------------------------------------------------- display
     def apply_display_filter(self) -> None:
         text = self.edit_display_filter.text().strip()
@@ -558,7 +704,7 @@ class MainWindow(QMainWindow):
 
         self._set_filter_error("")
         self.proxy.set_packet_filter(compiled.predicate)
-        self.table.clearSelection()
+        self.table.setCurrentIndex(QModelIndex())
         self.detail.clear_packet()
         self.hex_view.set_packet(None)
         self._update_visible_count()
@@ -625,6 +771,8 @@ class MainWindow(QMainWindow):
         scrollbar = self.table.verticalScrollBar()
         at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
         self.model.append_packets(accepted)
+        self.flow_manager.add_packets(accepted)
+        self._schedule_flow_refresh()
         self.lbl_rows.setText(str(self.model.rowCount()))
         self._update_visible_count()
         self.btn_clear.setEnabled(self.model.rowCount() > 0)
@@ -682,9 +830,14 @@ class MainWindow(QMainWindow):
         self._set_capturing(False)
         self._update_file_buttons()
         self.stats_view.update_stats(self.stats)
+        if self.flow_manager.flows:
+            self._refresh_process_map()
+        self._flow_dirty = True
+        self._refresh_flow_table()
         self.statusBar().showMessage(
             f"已停止 | 本次抓到 {self.captured_count} 个原始帧 | "
-            f"列表 {self.model.rowCount()} 包 | 显示 {self.proxy.rowCount()} 包"
+            f"列表 {self.model.rowCount()} 包 | 显示 {self.proxy.rowCount()} 包 | "
+            f"流 {len(self.flow_manager.flows)} 条"
         )
 
     def _set_capturing(self, capturing: bool) -> None:
@@ -702,6 +855,10 @@ class MainWindow(QMainWindow):
         self.btn_clear.setEnabled(
             self.model.rowCount() > 0 or self._offline_path is not None
         )
+        if capturing:
+            self._process_timer.start()
+        else:
+            self._process_timer.stop()
         self._update_file_buttons()
 
     # --------------------------------------------------------------- close

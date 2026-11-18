@@ -21,8 +21,9 @@ COL_DST = 3
 COL_PROTO = 4
 COL_LENGTH = 5
 COL_INFO = 6
+COL_PROCESS = 7
 
-HEADERS = ["序号", "时间", "源地址", "目的地址", "协议", "长度", "信息"]
+HEADERS = ["序号", "时间", "源地址", "目的地址", "协议", "长度", "信息", "进程"]
 SORT_ROLE = Qt.UserRole + 1
 
 _PROTOCOL_COLORS = {
@@ -45,6 +46,7 @@ class PacketTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._packets: list[Packet] = []
+        self._process_map = None
 
     # ------------------------------------------------------------ Qt model
     def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802
@@ -79,6 +81,9 @@ class PacketTableModel(QAbstractTableModel):
                 return str(packet.orig_len)
             if column == COL_INFO:
                 return packet.summary
+            if column == COL_PROCESS:
+                process = self._lookup_process(packet)
+                return process.display if process is not None else "-"
             return None
 
         if role == Qt.ToolTipRole:
@@ -116,6 +121,9 @@ class PacketTableModel(QAbstractTableModel):
                 return packet.orig_len
             if column == COL_INFO:
                 return packet.summary.lower()
+            if column == COL_PROCESS:
+                process = self._lookup_process(packet)
+                return process.name.lower() if process is not None else ""
             return None
 
         return None
@@ -141,6 +149,40 @@ class PacketTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._packets.clear()
         self.endResetModel()
+
+    def set_process_map(self, process_map) -> None:
+        self._process_map = process_map
+        self.refresh_process_column()
+
+    def refresh_process_column(self) -> None:
+        if self._packets:
+            # Do not include SORT_ROLE here: a 3 s mapping refresh must not
+            # force the proxy to re-sort up to 200k rows while the user is
+            # capturing.  A later header click re-sorts with fresh labels.
+            self.dataChanged.emit(
+                self.index(0, COL_PROCESS),
+                self.index(len(self._packets) - 1, COL_PROCESS),
+                [Qt.DisplayRole, Qt.ToolTipRole],
+            )
+
+    def _lookup_process(self, packet: Packet):
+        if self._process_map is None:
+            return None
+        # A response packet's source is the remote server; fall back to the
+        # destination so the column shows the local process in both directions.
+        for ip, port in (
+            (packet.ip_src, packet.sport),
+            (packet.ip_dst, packet.dport),
+        ):
+            if not ip:
+                continue
+            try:
+                process = self._process_map.lookup(ip, port)
+            except Exception:
+                process = None
+            if process is not None:
+                return process
+        return None
 
     def packet_at(self, row: int) -> Packet | None:
         if 0 <= row < len(self._packets):

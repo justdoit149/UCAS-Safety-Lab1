@@ -120,6 +120,7 @@
 │   │   ├── dissector.py       # 链路/网络/传输层解析
 │   │   ├── app_protocols.py   # HTTP/DNS/TLS 识别与应用层字段
 │   │   ├── filtering.py       # BPF 抓包过滤与显示过滤表达式
+│   │   ├── flowkey.py         # 规范化五元组与端点文本（M6）
 │   │   └── pcap_io.py         # pcap 文件读写（M5）
 │   ├── services/
 │   │   ├── __init__.py
@@ -134,12 +135,18 @@
 │       ├── detail_view.py
 │       ├── hex_view.py
 │       ├── flow_model.py
+│       ├── flow_view.py       # 流表、进程筛选、流时序（M6）
 │       ├── stats_view.py
 │       └── theme.py
 └── tests/
+    ├── test_app_protocols.py
     ├── test_dissector.py
-    ├── test_display_filter.py
-    └── test_flows.py
+    ├── test_filtering.py
+    ├── test_flows.py
+    ├── test_pcap_driver.py
+    ├── test_pcap_io.py
+    ├── test_process_map.py
+    └── test_stats.py
 ```
 
 ## 4. 数据模型
@@ -201,26 +208,26 @@ class Packet:
 ```python
 @dataclass
 class Flow:
-    key: tuple                 # 规范化五元组
-    proto: str                 # TCP/UDP
-    endpoint_a: tuple          # (ip, port)，首包发送方
-    endpoint_b: tuple
-    packets: int
-    bytes: int
+    key: tuple                 # (transport, sorted(endpoint, endpoint))
+    protocol: str              # TCP / UDP
+    src_ip: str                # 首包发送方，仅用于展示，不参与归并
+    src_port: int
+    dst_ip: str
+    dst_port: int
+    src_endpoint: tuple        # (packed_ip, port)
+    dst_endpoint: tuple
     first_ts: float
     last_ts: float
-    initiator: tuple           # 首包方向
-    state: str                 # NEW/SYN_SENT/SYN_RCVD/ESTABLISHED/...
-    closed: bool
-    app: str
-    syn_count: int
-    fin_count: int
-    rst_count: int
-    endpoint_procs: dict = field(default_factory=dict)
-                               # (ip, port) -> (pid, name)，两个端点分别映射
+    packets: list[Packet]
+    byte_count: int
+    app: str                   # 流内最近识别出的应用层协议
+    state: str                 # TCP 状态或 UDP ACTIVE/EXPIRED
+    fin_directions: set[str]   # 记录哪些方向发过 FIN
+    proc_src: object | None    # 源端点进程
+    proc_dst: object | None    # 目的端点进程
 ```
 
-五元组规范化：对两端 `(ip, port)` 打包比较排序，保证双向包落到同一条流；`initiator` 保留首包方向，用于展示 `A → B`。
+五元组规范化：对两端 `(ip, port)` 打包比较排序，保证双向包落到同一条流；`src_*`/`dst_*` 保留首包方向，用于展示 `A → B`。`proc_src`/`proc_dst` 分开保存两端进程，`process_pids` 与 `process_label` 负责去重展示和按 PID 筛选。
 
 ## 5. 抓包层（PcapDriver）
 
@@ -376,34 +383,36 @@ proto   := "tcp" | "udp" | "icmp" | "icmp6" | "ip" | "ipv4"
 
 ### 8.1 归流
 
-- TCP/UDP 都用 `(proto, ip_a, port_a, ip_b, port_b)` 规范化键。
-- IP 用 `ipaddress.ip_address(...).packed` 比较，保证 IPv6 文本形式不同也能归到同一流。
-- 每条流维护包数、字节数（用 `orig_len`）、首末时间、应用层协议、TCP 标志计数。
+- TCP/UDP 都用 `(transport, sorted(endpoint, endpoint))` 规范化键，端点再排序，使两个方向落进同一个字典槽。
+- IP 用 `ipaddress.ip_address(...).packed` 比较，保证 IPv6 文本形式不同也能归到同一流；`fe80::1%12` 这类 zone id 在归并前去掉。
+- 每条流维护包数、字节数（用 `orig_len`）、首末时间、应用层协议和当前 TCP 状态。
 - TCP 状态机：
-  - 无 SYN 的单向包 → `NEW`
-  - SYN → `SYN_SENT`
-  - SYN+ACK → `SYN_RCVD`
-  - ACK → `ESTABLISHED`
-  - FIN → `FIN_WAIT`，双向 FIN 或收到 RST → `CLOSED`
-  - 只做启发式展示，不追求完整 RFC 状态机。
-- 流表按最近活跃时间排序；超过 2 分钟无包的非 TCP 流可标记 `EXPIRED`。
+  - 首包无标志 → `NEW`；SYN → `SYN_SENT`；SYN+ACK → `SYN_RCVD`；随后的纯 ACK → `ESTABLISHED`。
+  - 抓包从中途开始时，首个纯 ACK 直接把新流置为 `ESTABLISHED`。
+  - 单向 FIN → `FIN_WAIT`，双向 FIN 或收到 RST → `CLOSED`。
+  - 只做启发式展示，不追求完整 RFC 状态机；SYN+ACK 不再被误判为已建立。
+- UDP 流状态为 `ACTIVE`；以当前流表中的最新时间为基准，超过 120 秒无包标记 `EXPIRED`，同一五元组再次出现时恢复 `ACTIVE`。
+- 流表由 `FlowManager.flows_sorted()` 按最近活跃时间排序，界面默认也按「最后活动」倒序，用户可点表头改排序。
 
 ### 8.2 进程映射
 
-- 后台每 3 s 调 `psutil.net_connections(kind="tcp")`，建立 `(ip, port) -> (pid, name)` 快照；IP 用 `ipaddress.ip_address(...).compressed` 规范化，避免 IPv6 的 `::1` 与完整写法对不上。
+- 抓包期间每 3 s 调 `psutil.net_connections(kind="tcp")`，建立 `(ip, port) -> ProcessInfo(pid, name)` 快照；IP 用 `ipaddress.ip_address(...).compressed` 规范化，避免 IPv6 的 `::1` 与完整写法对不上。刷新在 UI 线程的定时器中执行，`psutil` 调用短暂阻塞，因此不放在解析线程里修改共享状态。
 - 流表提供「刷新进程」按钮，演示前手动刷新一次，避免 3 s 定时器错过短连接。
 - 一个本地端口可能对应监听 socket 和已建立连接，优先取状态为 `ESTABLISHED` 的记录。
-- 流的两个端点分别查表，结果存进 `Flow.endpoint_procs`；远端端点没有本地进程，显示 `-`（混杂模式抓到其他主机流量时正常）。
+- 流的两个端点分别查表，结果存进 `Flow.proc_src` / `Flow.proc_dst`；`endpoint_procs` 负责汇总，远端端点没有本地进程时显示 `-`（混杂模式抓到其他主机流量时正常）。
 - 回环流（两端都在本机）会映射到两个进程，例如浏览器 ↔ 本地 HTTP 服务；流表显示「进程 A ↔ 进程 B」，按进程筛选时只要任一端的 PID 命中，就算该进程的流。
-- 无权限读取某进程时跳过该条，不中断刷新。
-- 流表增加「进程」列；双击某进程/流可筛选出该流的所有包；提供「按进程筛选」把所有属于该 PID 的 TCP 流列出来（加分项要求）。
-- 包列表提供可选的「进程」列（默认隐藏，避免表格过宽），值取该包源端点对应的进程；回环包显示发包进程，取不到显示 `-`。
+- 无权限读取某进程时跳过该条，不中断刷新；刷新失败保留上一份快照，并在流表上方显示错误，不把已有映射清空。
+- 连接关闭后再次刷新会查不到端点，因此已写入流的进程标签保留，避免停止抓包后整列变回 `-`。
+- 流表增加「进程」列，并提供一个下拉框列出当前所有 TCP 流涉及的进程；选中某 PID 后只显示该进程的 TCP 流（加分项要求）。
+- 选中流后「显示所选流数据包」把包列表过滤到该流；流表双击效果相同。清除显示过滤即可恢复全部包。
+- 包列表提供可选的「进程」列（默认隐藏，避免表格过宽），先查源端点、查不到再查目的端点，因此请求和响应两个方向都能显示本地进程；仍取不到显示 `-`。
 - 以管理员运行可提高进程覆盖率；普通用户下系统进程可能读不到，流表显示 `-`，报告和界面提示中说明这一限制，不伪装成全部可见。
 
 ### 8.3 流时序视图
 
 - 选中流表中的一条流，右侧显示该流的包序列：序号、相对时间、方向（A→B / B→A）、TCP 标志、长度、摘要。
-- 方向用箭头和对齐的两列呈现，形成简化时序图；双击某行跳转到包列表对应包并高亮。
+- 方向列用箭头表示，A→B 与 B→A 用不同颜色区分，形成简化的时序读图；双击某行跳转到包列表对应包并高亮。
+- 单条流最多渲染前 1000 个包，超出时在标题显示「共 N 包，显示前 1000 包」，避免超长流阻塞 UI。
 - 该视图对应 PPT 第 15 页「图形化的界面对于分析流的时序图具有重要帮助作用」，也是流追踪加分项的展示点。
 - 不绘制完整梯形图（lifeline），控制复杂度；表格形式在演示视频中足够清晰。
 
@@ -434,15 +443,16 @@ proto   := "tcp" | "udp" | "icmp" | "icmp6" | "ip" | "ipv4"
 ├──────────────────────────────┬─────────────────────────────────────────────────┤
 │ 字段树（可展开）              │ 十六进制 + ASCII，选中字段高亮                  │
 ├──────────────────────────────┴─────────────────────────────────────────────────┤
-│ [计数] [统计图表]（M6 再加 [流表]）                                            │
+│ [计数] [统计图表] [流表]                                                        │
 └ 状态栏：已抓 N 包 | 显示 M 包 | 丢包 D | 状态：抓包中/已停止/离线               ┘
 ```
 
 - 包列表用 `QAbstractTableModel` + `QSortFilterProxyModel`；批量插入用 `beginInsertRows/endInsertRows`。
 - 字段树用 `QTreeWidget`，双击字段联动十六进制高亮；选中包时重建树。
 - 十六进制视图用只读 `QPlainTextEdit`：偏移列、16 字节十六进制、ASCII；记录每个字节在文档中的字符位置，用 `ExtraSelections` 同时高亮十六进制区和 ASCII 区。这样保留原生滚动/选中能力，也避免自绘控件的滚动条细节。
-- 流表列：协议、源、目的、状态、包数、字节、时长、进程、应用。
-- 流表选中一条流时，右侧显示流时序表（§8.3）；双击流或进程沿用「筛出该流/该进程全部 TCP 流」的逻辑。
+- 流表列：协议、源、目的、状态、包数、字节、时长、应用、进程、最后活动；状态用颜色区分（已建立绿、关闭灰、等待橙）。
+- 流表上方有进程下拉框、「刷新进程」「显示所选流数据包」「清除筛选」和「包列表显示进程列」复选框；右下角显示当前流数 / TCP 流数。
+- 流表选中一条流时，右侧显示流时序表（§8.3）；双击流等同「显示所选流数据包」，进程下拉框用于筛出某 PID 的全部 TCP 流。
 - 包列表提供可选「进程」列（默认隐藏），便于录屏时直接展示某条流属于哪个进程。
 - 底部选项卡：`[计数]` 显示已捕获帧、列表/显示包数、驱动收包与丢包；`[统计图表]` 显示协议分布柱状图、最近 60 秒包速率曲线（pyqtgraph）和总包数/总字节/协议种类摘要。
 - 统计累加器与 Qt 解耦（`CaptureStats`），按包时间戳分桶，实时抓包和离线打开共用同一套图表。
@@ -482,13 +492,15 @@ proto   := "tcp" | "udp" | "icmp" | "icmp6" | "ip" | "ipv4"
   - 显示过滤：合法/非法表达式、优先级、括号、`not`；必须通过 §7.2 列出的全部验收表达式，包括 `ipv4`/`ip6`/`https` 别名。
   - pcap 文件：读写往返、大小端/微秒/纳秒 magic、截断记录、snaplen 越界、混合 linktype 拒绝、缓存上限截断。
   - 统计：协议计数、字节数、按时间戳分桶的包速率、60 秒滑动窗口和重置。
-  - 流状态机：SYN/SYN-ACK/ACK/FIN/RST 序列。
+  - 归流：双向包合并、IPv6 文本规范化、zone id 忽略、非 IP 包忽略、TCP 状态机 SYN/SYN-ACK/ACK/FIN/RST、UDP 过期与重新激活、按进程筛选。
+  - 进程映射：伪造 psutil 连接对象验证快照、ESTABLISHED 优先、IPv6 压缩、权限异常保留旧快照、进程名缓存。
   - 流时序：一次 HTTP 请求的握手、请求、响应、挥手在时序视图中顺序与方向正确。
 - 集成测试：
   - 本机起 `http.server`，curl 访问回环，验证 HTTP 解析与归流。
   - `ping 127.0.0.1` 验证 ICMP。
   - `nslookup` 验证 DNS。
   - 访问 HTTPS 站点验证 SNI。
+- GUI 冒烟测试（`_setup`，不提交）：离线 pcap 验证三条流合并、TCP 状态、流时序、注入进程快照后的进程筛选、包列表进程列、显示所选流包和双击跳转；本机回环实时抓包验证 `python.exe` 进程映射和截图。
 - 手工验收：按第 12 节里程碑表逐项过。
 - 性能：WLAN 抓 10 秒统计包数/丢包，确认 UI 可操作。
 

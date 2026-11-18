@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 
+from app.core.flowkey import flow_key_for
 from app.core.models import Field, Layer, Packet
 
 HTTP_PORTS = {80, 8080, 8000, 8888}
@@ -183,15 +184,15 @@ class ApplicationContext:
 
 # ------------------------------------------------------------------ helpers
 def _flow_key(packet: Packet) -> tuple | None:
-    if not packet.ip_src or not packet.ip_dst or packet.transport not in ("TCP", "UDP"):
+    if not packet.ip_src or not packet.ip_dst:
         return None
-    try:
-        left = (ipaddress.ip_address(packet.ip_src).packed, packet.sport)
-        right = (ipaddress.ip_address(packet.ip_dst).packed, packet.dport)
-    except ValueError:
-        return None
-    first, second = sorted((left, right))
-    return (packet.transport, first, second)
+    return flow_key_for(
+        packet.transport,
+        packet.ip_src,
+        packet.sport,
+        packet.ip_dst,
+        packet.dport,
+    )
 
 
 def _safe_offset_length(capture_len: int, offset: int, length: int) -> tuple[int, int]:
