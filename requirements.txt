@@ -1,1 +1,2 @@
 PySide6==6.4.3
+pyqtgraph==0.14.0

@@ -1,12 +1,15 @@
-"""M2 main window: packet list, protocol detail tree and hex dump."""
+"""Main window: packet list, protocol detail tree, hex dump and statistics."""
 
 from __future__ import annotations
+
+import os
+from datetime import datetime
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
-    QGroupBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -16,10 +19,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QTableView,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from app.core.app_protocols import ApplicationContext
+from app.core.dissector import dissect
+from app.core.models import Packet
 from app.core.filtering import (
     CAPTURE_FILTER_PRESETS,
     DISPLAY_FILTER_PRESETS,
@@ -34,7 +41,14 @@ from app.core.pcap_driver import (
     libpcap_version,
     list_devices,
 )
+from app.core.pcap_io import (
+    PcapFormatError,
+    PcapWriteError,
+    read_pcap,
+    write_pcap,
+)
 from app.services.capture import CaptureWorker
+from app.services.stats import CaptureStats
 from app.ui.detail_view import DetailView
 from app.ui.hex_view import HexView
 from app.ui.packet_model import (
@@ -45,6 +59,9 @@ from app.ui.packet_model import (
     PacketTableModel,
     SORT_ROLE,
 )
+from app.ui.stats_view import StatsView
+
+_BASE_TITLE = "1A 网络嗅探器 - M5 文件与统计"
 
 _DATALINK_NAMES = {
     0: "DLT_NULL（回环）",
@@ -56,13 +73,17 @@ _DATALINK_NAMES = {
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("1A 网络嗅探器 - M4 应用层识别")
-        self.resize(1280, 860)
+        self.setWindowTitle(_BASE_TITLE)
+        self.resize(1280, 900)
 
         self._worker: CaptureWorker | None = None
         self._capture_available = False
+        self._offline_path: str | None = None
         self.captured_count = 0
         self._active_capture_filter = ""
+        self.max_packets = 200_000
+        self._limit_warned = False
+        self.stats = CaptureStats()
 
         self._build_ui()
         self._load_devices()
@@ -90,6 +111,21 @@ class MainWindow(QMainWindow):
         control_row.addWidget(self.btn_stop)
         control_row.addWidget(self.btn_clear)
         root.addLayout(control_row)
+
+        file_row = QHBoxLayout()
+        self.btn_open = QPushButton("打开 pcap")
+        self.btn_save_all = QPushButton("保存全部")
+        self.btn_save_visible = QPushButton("保存显示结果")
+        self.btn_save_all.setEnabled(False)
+        self.btn_save_visible.setEnabled(False)
+        self.lbl_file = QLabel("当前来源: 实时抓包")
+        self.lbl_file.setStyleSheet("color: #555;")
+        file_row.addWidget(self.btn_open)
+        file_row.addWidget(self.btn_save_all)
+        file_row.addWidget(self.btn_save_visible)
+        file_row.addSpacing(12)
+        file_row.addWidget(self.lbl_file, 1)
+        root.addLayout(file_row)
 
         capture_filter_row = QHBoxLayout()
         capture_filter_row.addWidget(QLabel("抓包过滤(BPF):"))
@@ -181,8 +217,9 @@ class MainWindow(QMainWindow):
         self._splitters.setSizes([540, 260])
         root.addWidget(self._splitters, 1)
 
-        stats_box = QGroupBox("抓包统计")
-        stats_row = QHBoxLayout(stats_box)
+        self.bottom_tabs = QTabWidget()
+        count_tab = QWidget()
+        stats_row = QHBoxLayout(count_tab)
         stats_row.setContentsMargins(10, 6, 10, 6)
         self.lbl_captured = QLabel("0")
         self.lbl_received = QLabel("0")
@@ -202,7 +239,16 @@ class MainWindow(QMainWindow):
             stats_row.addWidget(label)
             stats_row.addSpacing(18)
         stats_row.addStretch(1)
-        root.addWidget(stats_box)
+        self.lbl_limit_notice = QLabel("")
+        self.lbl_limit_notice.setStyleSheet("color: #b26a00;")
+        self.lbl_limit_notice.setVisible(False)
+        stats_row.addWidget(self.lbl_limit_notice)
+        self.bottom_tabs.addTab(count_tab, "计数")
+
+        self.stats_view = StatsView()
+        self.bottom_tabs.addTab(self.stats_view, "统计图表")
+        self.bottom_tabs.setMaximumHeight(250)
+        root.addWidget(self.bottom_tabs)
 
         self.setCentralWidget(central)
         self.statusBar().showMessage("正在检测 Npcap...")
@@ -211,6 +257,9 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_capture)
         self.btn_stop.clicked.connect(self.stop_capture)
         self.btn_clear.clicked.connect(self.clear_packets)
+        self.btn_open.clicked.connect(self.open_pcap_dialog)
+        self.btn_save_all.clicked.connect(self.save_all_packets)
+        self.btn_save_visible.clicked.connect(self.save_displayed_packets)
         self.btn_apply_filter.clicked.connect(self.apply_display_filter)
         self.btn_clear_filter.clicked.connect(self.clear_display_filter)
         self.edit_display_filter.returnPressed.connect(self.apply_display_filter)
@@ -291,7 +340,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- capture
     def start_capture(self) -> None:
-        if self._worker is not None:
+        if self._worker is not None or self._offline_path is not None:
             return
         device_name = self.combo_devices.currentData()
         if not device_name:
@@ -339,6 +388,161 @@ class MainWindow(QMainWindow):
         self.lbl_rows.setText("0")
         self.lbl_visible.setText("0")
         self.btn_clear.setEnabled(False)
+        self.stats.reset()
+        self.stats_view.update_stats(self.stats)
+        self._limit_warned = False
+        self.lbl_limit_notice.clear()
+        self.lbl_limit_notice.setVisible(False)
+        self._offline_path = None
+        self.lbl_file.setText("当前来源: 实时抓包")
+        self.setWindowTitle(_BASE_TITLE)
+        self._update_file_buttons()
+        self._set_capturing(self._worker is not None)
+
+    # -------------------------------------------------------------- pcap IO
+    def open_pcap_dialog(self) -> None:
+        if self._worker is not None:
+            return
+        path, _selected = QFileDialog.getOpenFileName(
+            self,
+            "打开 pcap 文件",
+            "",
+            "pcap 文件 (*.pcap *.cap);;所有文件 (*)",
+        )
+        if path:
+            self.open_pcap(path)
+
+    def open_pcap(self, path: str) -> None:
+        """Load a classic pcap file and run the same dissector as live capture."""
+        if self._worker is not None:
+            return
+        try:
+            offline = read_pcap(path, max_records=self.max_packets)
+        except PcapFormatError as exc:
+            QMessageBox.critical(self, "打开 pcap 失败", str(exc))
+            return
+
+        self.clear_packets()
+        context = ApplicationContext()
+        packets: list[Packet] = []
+        for index, record in enumerate(offline.records, start=1):
+            try:
+                packet = dissect(
+                    index,
+                    record.ts,
+                    record.raw,
+                    record.orig_len,
+                    offline.linktype,
+                    context,
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                packet = Packet(
+                    index=index,
+                    ts=record.ts,
+                    caplen=record.caplen,
+                    orig_len=record.orig_len,
+                    raw=record.raw,
+                    linktype=offline.linktype,
+                    proto_label="解析错误",
+                    summary=f"dissector error: {exc!r}",
+                    truncated=True,
+                )
+            packets.append(packet)
+
+        self.model.append_packets(packets)
+        self.stats.add_packets(packets)
+        self.stats_view.update_stats(self.stats)
+        self.captured_count = len(packets)
+        self._update_counters(len(packets), 0, 0, 0)
+        self.lbl_rows.setText(str(self.model.rowCount()))
+        self._update_visible_count()
+        self.btn_clear.setEnabled(bool(packets))
+
+        self._offline_path = os.path.abspath(path)
+        name = os.path.basename(self._offline_path)
+        self.lbl_file.setText(f"当前来源: 离线文件 {name}")
+        self.setWindowTitle(f"{_BASE_TITLE} - {name}")
+        self._set_capturing(False)
+        self._update_file_buttons()
+
+        if offline.truncated:
+            self._show_limit_notice(offline=True)
+
+        link_name = _DATALINK_NAMES.get(offline.linktype,
+                                       f"DLT={offline.linktype}")
+        note = "（仅加载到缓存上限）" if offline.truncated else ""
+        self.statusBar().showMessage(
+            f"已打开 {name} | {link_name} | {len(packets)} 包{note}"
+        )
+
+    def save_all_packets(self) -> None:
+        self._save_packets(list(self.model.packets), "全部")
+
+    def save_displayed_packets(self) -> None:
+        packets = []
+        for row in range(self.proxy.rowCount()):
+            source = self.proxy.mapToSource(self.proxy.index(row, 0))
+            packet = self.model.packet_at(source.row())
+            if packet is not None:
+                packets.append(packet)
+        self._save_packets(packets, "显示结果")
+
+    def _save_packets(self, packets: list, label: str) -> None:
+        if not packets:
+            QMessageBox.warning(self, "没有可保存的包", "当前列表为空。")
+            return
+        if self._worker is not None:
+            QMessageBox.warning(self, "正在抓包", "请先停止抓包再保存文件。")
+            return
+
+        if self._offline_path:
+            default = os.path.basename(self._offline_path)
+        else:
+            default = datetime.now().strftime("capture_%Y%m%d_%H%M%S.pcap")
+        path, _selected = QFileDialog.getSaveFileName(
+            self,
+            f"保存{label}包为 pcap",
+            default,
+            "pcap 文件 (*.pcap);;所有文件 (*)",
+        )
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".pcap"
+
+        try:
+            count = write_pcap(path, packets)
+        except PcapWriteError as exc:
+            QMessageBox.critical(self, "保存 pcap 失败", str(exc))
+            return
+        self.statusBar().showMessage(
+            f"已保存{label} {count} 包到 {os.path.basename(path)}"
+        )
+
+    def _show_limit_notice(self, offline: bool = False) -> None:
+        if self._limit_warned:
+            return
+        self._limit_warned = True
+        if offline:
+            message = (
+                f"已达到缓存上限 {self.max_packets} 包，"
+                "文件剩余部分未加载"
+            )
+        else:
+            message = (
+                f"已达到缓存上限 {self.max_packets} 包，"
+                "后续包不再加入列表（抓包统计仍继续）"
+            )
+        self.lbl_limit_notice.setText(message)
+        self.lbl_limit_notice.setVisible(True)
+        self.statusBar().showMessage(message)
+
+    def _update_file_buttons(self) -> None:
+        active = self._worker is not None
+        has_packets = self.model.rowCount() > 0
+        self.btn_open.setEnabled(not active)
+        self.btn_save_all.setEnabled(has_packets and not active)
+        self.btn_save_visible.setEnabled(has_packets and not active)
 
     # -------------------------------------------------------------- display
     def apply_display_filter(self) -> None:
@@ -409,12 +613,22 @@ class MainWindow(QMainWindow):
     def _on_packets_ready(self, packets: list) -> None:
         if not packets:
             return
+        self.stats.add_packets(packets)
+        remaining = self.max_packets - self.model.rowCount()
+        if remaining <= 0:
+            self._show_limit_notice()
+            return
+        accepted = packets[:remaining]
+        if len(accepted) < len(packets):
+            self._show_limit_notice()
+
         scrollbar = self.table.verticalScrollBar()
         at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
-        self.model.append_packets(packets)
+        self.model.append_packets(accepted)
         self.lbl_rows.setText(str(self.model.rowCount()))
         self._update_visible_count()
         self.btn_clear.setEnabled(self.model.rowCount() > 0)
+        self._update_file_buttons()
         if at_bottom:
             self.table.scrollToBottom()
 
@@ -427,6 +641,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         self.captured_count = captured
         self._update_counters(captured, received, dropped, if_dropped)
+        self.stats_view.update_stats(self.stats)
 
     def _update_counters(
         self,
@@ -465,6 +680,8 @@ class MainWindow(QMainWindow):
         if worker is not None:
             worker.deleteLater()
         self._set_capturing(False)
+        self._update_file_buttons()
+        self.stats_view.update_stats(self.stats)
         self.statusBar().showMessage(
             f"已停止 | 本次抓到 {self.captured_count} 个原始帧 | "
             f"列表 {self.model.rowCount()} 包 | 显示 {self.proxy.rowCount()} 包"
@@ -473,13 +690,19 @@ class MainWindow(QMainWindow):
     def _set_capturing(self, capturing: bool) -> None:
         has_device = self.combo_devices.count() > 0
         self.btn_start.setEnabled(
-            self._capture_available and has_device and not capturing
+            self._capture_available
+            and has_device
+            and not capturing
+            and self._offline_path is None
         )
         self.btn_stop.setEnabled(capturing)
         self.combo_devices.setEnabled(not capturing)
         self.btn_refresh.setEnabled(not capturing)
         self.combo_capture_filter.setEnabled(not capturing)
-        self.btn_clear.setEnabled(self.model.rowCount() > 0)
+        self.btn_clear.setEnabled(
+            self.model.rowCount() > 0 or self._offline_path is not None
+        )
+        self._update_file_buttons()
 
     # --------------------------------------------------------------- close
     def closeEvent(self, event) -> None:
