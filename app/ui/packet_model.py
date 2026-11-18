@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import (
+    QAbstractTableModel,
+    QModelIndex,
+    QSortFilterProxyModel,
+    Qt,
+)
 from PySide6.QtGui import QBrush, QColor
 
 from app.core.models import Packet
@@ -142,6 +147,32 @@ class PacketTableModel(QAbstractTableModel):
     @property
     def packets(self) -> list[Packet]:
         return list(self._packets)
+
+
+class PacketFilterProxyModel(QSortFilterProxyModel):
+    """Sort/filter proxy that evaluates a compiled display-filter predicate."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._predicate = None
+
+    def set_packet_filter(self, predicate) -> None:
+        self._predicate = predicate
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent) -> bool:  # noqa: N802
+        if self._predicate is None:
+            return True
+        model = self.sourceModel()
+        if not isinstance(model, PacketTableModel):
+            return True
+        packet = model.packet_at(source_row)
+        if packet is None:
+            return False
+        try:
+            return bool(self._predicate(packet))
+        except Exception:
+            return False
 
 
 def _format_time(ts: float) -> str:

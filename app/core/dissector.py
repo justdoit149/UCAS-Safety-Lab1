@@ -448,6 +448,7 @@ def _parse_ipv4(packet: Packet, raw: bytes, offset: int) -> None:
 
     packet.ip_src = _ipv4(raw, offset + 12)
     packet.ip_dst = _ipv4(raw, offset + 16)
+    packet.ip_version = 4
     packet.proto_label = "IPv4"
     packet.summary = f"{packet.ip_src} → {packet.ip_dst}  proto={_proto_name(proto)}"
 
@@ -515,6 +516,7 @@ def _parse_ipv6(packet: Packet, raw: bytes, offset: int) -> None:
 
     packet.ip_src = src
     packet.ip_dst = dst
+    packet.ip_version = 6
     packet.proto_label = "IPv6"
     packet.summary = f"{src} → {dst}  next={_proto_name(next_header)}"
 

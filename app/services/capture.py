@@ -32,12 +32,14 @@ class CaptureWorker(QThread):
         device_name: str,
         snaplen: int = 262144,
         promisc: bool = True,
+        capture_filter: str = "",
         parent=None,
     ):
         super().__init__(parent)
         self.device_name = device_name
         self.snaplen = snaplen
         self.promisc = promisc
+        self.capture_filter = (capture_filter or "").strip()
         self.captured = 0
         self._stop_event = threading.Event()
 
@@ -63,6 +65,13 @@ class CaptureWorker(QThread):
                 promisc=self.promisc,
                 timeout_ms=50,
             )
+            if self.capture_filter:
+                try:
+                    handle.set_filter(self.capture_filter)
+                except PcapError as exc:
+                    raise PcapError(
+                        f"抓包过滤器无效：{self.capture_filter!r}\n{exc}"
+                    ) from exc
             self.opened.emit(self.device_name, handle.datalink)
 
             last_stats = time.monotonic()

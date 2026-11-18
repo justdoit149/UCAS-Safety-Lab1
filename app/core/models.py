@@ -37,6 +37,7 @@ class Packet:
     dst: str = ""              # link-layer destination (MAC)
     ip_src: str = ""
     ip_dst: str = ""
+    ip_version: int = 0        # 4 / 6 / 0 when no IP layer
     sport: int = 0
     dport: int = 0
     transport: str = ""        # TCP / UDP / ICMP / ICMPv6

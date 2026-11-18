@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QSortFilterProxyModel, Qt
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -19,6 +20,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.filtering import (
+    CAPTURE_FILTER_PRESETS,
+    DISPLAY_FILTER_PRESETS,
+    CaptureFilterHint,
+    FilterSyntaxError,
+    compile_display_filter,
+    resolve_capture_filter,
+)
 from app.core.pcap_driver import (
     NpcapNotFoundError,
     PcapError,
@@ -32,6 +41,7 @@ from app.ui.packet_model import (
     COL_INFO,
     COL_NO,
     COL_TIME,
+    PacketFilterProxyModel,
     PacketTableModel,
     SORT_ROLE,
 )
@@ -46,12 +56,13 @@ _DATALINK_NAMES = {
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("1A 网络嗅探器 - M2 协议解析")
-        self.resize(1280, 820)
+        self.setWindowTitle("1A 网络嗅探器 - M3 过滤")
+        self.resize(1280, 860)
 
         self._worker: CaptureWorker | None = None
         self._capture_available = False
         self.captured_count = 0
+        self._active_capture_filter = ""
 
         self._build_ui()
         self._load_devices()
@@ -80,12 +91,55 @@ class MainWindow(QMainWindow):
         control_row.addWidget(self.btn_clear)
         root.addLayout(control_row)
 
+        capture_filter_row = QHBoxLayout()
+        capture_filter_row.addWidget(QLabel("抓包过滤(BPF):"))
+        self.combo_capture_filter = QComboBox()
+        self.combo_capture_filter.setEditable(True)
+        self.combo_capture_filter.setInsertPolicy(QComboBox.NoInsert)
+        self.combo_capture_filter.setMinimumWidth(420)
+        self.combo_capture_filter.addItems(CAPTURE_FILTER_PRESETS)
+        self.combo_capture_filter.setCurrentIndex(0)
+        self.combo_capture_filter.setToolTip(
+            "内核 BPF 过滤，开始抓包前生效；留空或选择“（不过滤）”表示全部。\n"
+            "HTTP/HTTPS/DNS 会先翻译成对应的 BPF 端口表达式。"
+        )
+        capture_filter_row.addWidget(self.combo_capture_filter, 1)
+        capture_hint = QLabel(
+            "内核过滤，开始抓包前生效；HTTP/HTTPS/DNS 自动翻译为 BPF"
+        )
+        capture_hint.setStyleSheet("color: #777;")
+        capture_filter_row.addWidget(capture_hint)
+        root.addLayout(capture_filter_row)
+
+        display_filter_row = QHBoxLayout()
+        display_filter_row.addWidget(QLabel("显示过滤:"))
+        self.edit_display_filter = QLineEdit()
+        self.edit_display_filter.setPlaceholderText(
+            "如 tcp and port 80；留空显示全部；支持 and/or/not 和括号"
+        )
+        self.edit_display_filter.setClearButtonEnabled(True)
+        display_filter_row.addWidget(self.edit_display_filter, 1)
+        self.combo_display_presets = QComboBox()
+        self.combo_display_presets.addItem("常用表达式…")
+        self.combo_display_presets.addItems(DISPLAY_FILTER_PRESETS)
+        display_filter_row.addWidget(self.combo_display_presets)
+        self.btn_apply_filter = QPushButton("应用")
+        self.btn_clear_filter = QPushButton("清除")
+        display_filter_row.addWidget(self.btn_apply_filter)
+        display_filter_row.addWidget(self.btn_clear_filter)
+        root.addLayout(display_filter_row)
+
+        self.lbl_filter_error = QLabel("")
+        self.lbl_filter_error.setStyleSheet("color: #c62828;")
+        self.lbl_filter_error.setVisible(False)
+        root.addWidget(self.lbl_filter_error)
+
         self._splitters = QSplitter(Qt.Vertical)
         self._splitters.setChildrenCollapsible(False)
 
         self.table = QTableView()
         self.model = PacketTableModel(self)
-        self.proxy = QSortFilterProxyModel(self)
+        self.proxy = PacketFilterProxyModel(self)
         self.proxy.setSourceModel(self.model)
         self.proxy.setSortRole(SORT_ROLE)
         self.proxy.setDynamicSortFilter(True)
@@ -135,9 +189,11 @@ class MainWindow(QMainWindow):
         self.lbl_dropped = QLabel("0")
         self.lbl_ifdropped = QLabel("0")
         self.lbl_rows = QLabel("0")
+        self.lbl_visible = QLabel("0")
         for caption, label in (
             ("已捕获帧:", self.lbl_captured),
             ("列表包数:", self.lbl_rows),
+            ("显示包数:", self.lbl_visible),
             ("驱动接收:", self.lbl_received),
             ("驱动丢弃:", self.lbl_dropped),
             ("网卡丢弃:", self.lbl_ifdropped),
@@ -155,6 +211,11 @@ class MainWindow(QMainWindow):
         self.btn_start.clicked.connect(self.start_capture)
         self.btn_stop.clicked.connect(self.stop_capture)
         self.btn_clear.clicked.connect(self.clear_packets)
+        self.btn_apply_filter.clicked.connect(self.apply_display_filter)
+        self.btn_clear_filter.clicked.connect(self.clear_display_filter)
+        self.edit_display_filter.returnPressed.connect(self.apply_display_filter)
+        self.edit_display_filter.textChanged.connect(self._on_filter_text_changed)
+        self.combo_display_presets.activated.connect(self._on_display_preset)
         self.detail.field_selected.connect(self.hex_view.highlight)
         self.table.selectionModel().currentRowChanged.connect(
             self._on_current_row_changed
@@ -237,11 +298,22 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "没有网卡", "请先选择一块网卡。")
             return
 
+        try:
+            bpf = resolve_capture_filter(self.combo_capture_filter.currentText())
+        except CaptureFilterHint as exc:
+            QMessageBox.warning(self, "抓包过滤只接受 BPF", str(exc))
+            return
+
+        self._active_capture_filter = bpf
         self.clear_packets()
         self.captured_count = 0
         self._update_counters(0, 0, 0, 0)
 
-        self._worker = CaptureWorker(device_name, parent=self)
+        self._worker = CaptureWorker(
+            device_name,
+            capture_filter=bpf,
+            parent=self,
+        )
         self._worker.opened.connect(self._on_opened)
         self._worker.packets_ready.connect(self._on_packets_ready)
         self._worker.stats_ready.connect(self._on_stats)
@@ -249,7 +321,8 @@ class MainWindow(QMainWindow):
         self._worker.finished.connect(self._on_worker_finished)
 
         self._set_capturing(True)
-        self.statusBar().showMessage(f"正在打开网卡: {device_name}")
+        filter_note = f" | BPF: {bpf}" if bpf else ""
+        self.statusBar().showMessage(f"正在打开网卡: {device_name}{filter_note}")
         self._worker.start()
 
     def stop_capture(self) -> None:
@@ -264,12 +337,73 @@ class MainWindow(QMainWindow):
         self.detail.clear_packet()
         self.hex_view.set_packet(None)
         self.lbl_rows.setText("0")
+        self.lbl_visible.setText("0")
         self.btn_clear.setEnabled(False)
+
+    # -------------------------------------------------------------- display
+    def apply_display_filter(self) -> None:
+        text = self.edit_display_filter.text().strip()
+        if not text:
+            self.clear_display_filter()
+            return
+        try:
+            compiled = compile_display_filter(text)
+        except FilterSyntaxError as exc:
+            self._set_filter_error(str(exc))
+            return
+
+        self._set_filter_error("")
+        self.proxy.set_packet_filter(compiled.predicate)
+        self.table.clearSelection()
+        self.detail.clear_packet()
+        self.hex_view.set_packet(None)
+        self._update_visible_count()
+        self.statusBar().showMessage(
+            f"显示过滤已应用: {text} | 显示 {self.proxy.rowCount()} / "
+            f"{self.model.rowCount()} 包"
+        )
+
+    def clear_display_filter(self) -> None:
+        self.edit_display_filter.clear()
+        self.proxy.set_packet_filter(None)
+        self._set_filter_error("")
+        self._update_visible_count()
+        self.combo_display_presets.setCurrentIndex(0)
+
+    def _on_filter_text_changed(self, text: str) -> None:
+        del text
+        if self.lbl_filter_error.isVisible():
+            self._set_filter_error("")
+
+    def _on_display_preset(self, index: int) -> None:
+        if index <= 0:
+            return
+        self.edit_display_filter.setText(self.combo_display_presets.itemText(index))
+        self.combo_display_presets.setCurrentIndex(0)
+        self.apply_display_filter()
+
+    def _set_filter_error(self, message: str) -> None:
+        self.lbl_filter_error.setText(message)
+        self.lbl_filter_error.setVisible(bool(message))
+        if message:
+            self.edit_display_filter.setStyleSheet(
+                "border: 1px solid #c62828; background: #fff1f1;"
+            )
+        else:
+            self.edit_display_filter.setStyleSheet("")
+
+    def _update_visible_count(self) -> None:
+        self.lbl_visible.setText(str(self.proxy.rowCount()))
 
     def _on_opened(self, device_name: str, datalink: int) -> None:
         link_name = _DATALINK_NAMES.get(datalink, f"DLT={datalink}")
+        bpf_note = (
+            f" | BPF: {self._active_capture_filter}"
+            if self._active_capture_filter
+            else ""
+        )
         self.statusBar().showMessage(
-            f"抓包中 | {device_name} | 链路类型: {link_name}"
+            f"抓包中 | {device_name} | 链路类型: {link_name}{bpf_note}"
         )
 
     def _on_packets_ready(self, packets: list) -> None:
@@ -279,6 +413,7 @@ class MainWindow(QMainWindow):
         at_bottom = scrollbar.value() >= scrollbar.maximum() - 2
         self.model.append_packets(packets)
         self.lbl_rows.setText(str(self.model.rowCount()))
+        self._update_visible_count()
         self.btn_clear.setEnabled(self.model.rowCount() > 0)
         if at_bottom:
             self.table.scrollToBottom()
@@ -332,7 +467,7 @@ class MainWindow(QMainWindow):
         self._set_capturing(False)
         self.statusBar().showMessage(
             f"已停止 | 本次抓到 {self.captured_count} 个原始帧 | "
-            f"列表 {self.model.rowCount()} 包"
+            f"列表 {self.model.rowCount()} 包 | 显示 {self.proxy.rowCount()} 包"
         )
 
     def _set_capturing(self, capturing: bool) -> None:
@@ -343,6 +478,7 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(capturing)
         self.combo_devices.setEnabled(not capturing)
         self.btn_refresh.setEnabled(not capturing)
+        self.combo_capture_filter.setEnabled(not capturing)
         self.btn_clear.setEnabled(self.model.rowCount() > 0)
 
     # --------------------------------------------------------------- close

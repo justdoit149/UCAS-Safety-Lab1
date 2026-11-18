@@ -1,8 +1,7 @@
 """ctypes wrapper for Npcap's wpcap.dll.
 
-M1 only needs the live-capture path: enumerate devices, open a handle,
-read raw frames and read driver statistics.  Filter compilation and
-offline pcap files are deliberately left for later milestones.
+Covers device enumeration, live capture, BPF compilation/installation and
+driver statistics.  Offline pcap files are added in a later milestone.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 PCAP_ERRBUF_SIZE = 256
+PCAP_NETMASK_UNKNOWN = 0xFFFFFFFF
 
 PCAP_IF_LOOPBACK = 0x00000001
 PCAP_IF_UP = 0x00000002
@@ -91,6 +91,13 @@ class _PcapStat(Structure):
     ]
 
 
+class _BpfProgram(Structure):
+    _fields_ = [
+        ("bf_len", c_uint),
+        ("bf_insns", c_void_p),
+    ]
+
+
 _lib: Optional[ctypes.WinDLL] = None
 
 
@@ -114,6 +121,21 @@ def _configure(lib: ctypes.WinDLL) -> None:
 
     lib.pcap_datalink.argtypes = [c_void_p]
     lib.pcap_datalink.restype = c_int
+
+    lib.pcap_compile.argtypes = [
+        c_void_p,
+        POINTER(_BpfProgram),
+        c_char_p,
+        c_int,
+        c_uint,
+    ]
+    lib.pcap_compile.restype = c_int
+
+    lib.pcap_setfilter.argtypes = [c_void_p, POINTER(_BpfProgram)]
+    lib.pcap_setfilter.restype = c_int
+
+    lib.pcap_freecode.argtypes = [POINTER(_BpfProgram)]
+    lib.pcap_freecode.restype = None
 
     lib.pcap_next_ex.argtypes = [
         c_void_p,
@@ -325,6 +347,34 @@ class PcapHandle:
             detail = _decode(errbuf.value) or "unknown error"
             raise PcapError(f"无法打开网卡 {device}: {detail}")
         return cls(handle, device, int(lib.pcap_datalink(handle)), lib)
+
+    def set_filter(self, expression: str) -> None:
+        """Compile a BPF expression and attach it to the capture handle.
+
+        The kernel receives a copy of the compiled program, so the temporary
+        ``bpf_program`` is freed immediately after ``pcap_setfilter``.
+        """
+        if self._closed:
+            raise PcapError("handle 已关闭")
+        expression = (expression or "").strip()
+        if not expression:
+            return
+
+        program = _BpfProgram()
+        result = self._lib.pcap_compile(
+            self._handle,
+            byref(program),
+            expression.encode("utf-8"),
+            1,
+            PCAP_NETMASK_UNKNOWN,
+        )
+        if result != 0:
+            raise PcapError(f"过滤器编译失败: {self.error()}")
+        try:
+            if self._lib.pcap_setfilter(self._handle, byref(program)) != 0:
+                raise PcapError(f"过滤器安装失败: {self.error()}")
+        finally:
+            self._lib.pcap_freecode(byref(program))
 
     def error(self) -> str:
         if not self._handle:
