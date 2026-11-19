@@ -66,7 +66,7 @@ from app.ui.packet_model import (
 )
 from app.ui.stats_view import StatsView
 
-_BASE_TITLE = "1A 网络嗅探器 - M6 流跟踪与进程映射"
+_BASE_TITLE = "1A 网络嗅探器"
 
 _DATALINK_NAMES = {
     0: "DLT_NULL（回环）",

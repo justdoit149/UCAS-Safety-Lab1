@@ -12,7 +12,7 @@ from app.ui.main_window import MainWindow
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("1A Network Sniffer")
-    app.setApplicationDisplayName("1A 网络嗅探器")
+    app.setApplicationDisplayName("网络协议分析器")
     window = MainWindow()
     window.show()
     return app.exec()
