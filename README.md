@@ -1,6 +1,6 @@
 # 1A 网络嗅探器 / 协议分析器
 
-当前进度：**M7 Wireshark Lua 二次开发**。在 M6 的流跟踪与进程映射基础上，已实现自定义 LAB1A 协议解析器、专家信息、着色规则、按 `tcp.stream` 的流统计菜单，以及供 tshark 使用的命令行统计脚本。插件目标环境为 Wireshark 4.6.9 / Lua 5.4。
+当前进度：**M8 打包与交付**。M1–M7 的功能已全部完成；M8 增加 PyInstaller 打包脚本并在本机验证了打包后的实时抓包。M7 的 Wireshark 插件目标环境为 Wireshark 4.6.9 / Lua 5.4。
 
 ## 环境
 
@@ -17,6 +17,28 @@ python main.py
 ```
 
 或双击 `run.bat`。
+
+## M8 打包
+
+打包使用 PyInstaller 的 **onedir** 模式，Python 运行时和 Qt 插件都在 `dist\Lab1A-Sniffer\` 内，目标机不需要安装 Python；Npcap 驱动仍需单独安装。
+
+```bat
+python -m pip install -r requirements-build.txt
+build.bat
+```
+
+输出：
+
+```text
+dist\Lab1A-Sniffer\Lab1A-Sniffer.exe
+```
+
+- 运行时要把整个 `dist\Lab1A-Sniffer` 目录一起复制，不能只复制 exe。
+- 目标机要求 Windows 10/11 x64，并预装 Npcap 1.90（安装时勾选 WinPcap 兼容模式）。
+- `build.bat` 排除了 `plotly`、`matplotlib`、`pandas` 等本程序不用的可选重型库。开发机如果装过这些库，PyInstaller 的依赖分析会从约 1 分钟变成十几分钟。
+- 构建产物 `build/`、`dist/` 已被 `.gitignore` 忽略，不进入仓库。
+
+本机验证结果：打包后的 exe 能正常启动，网卡枚举成功，实时抓包计数从 0 增长到 80 包，停止抓包与关闭窗口均正常。
 
 ## M7 Wireshark 二次开发
 

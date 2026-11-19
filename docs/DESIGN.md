@@ -101,6 +101,8 @@
 山雨冬_202628014629002_ex1A_src/
 ├── main.py
 ├── requirements.txt
+├── requirements-build.txt
+├── build.bat                  # PyInstaller onedir 打包（M8）
 ├── run.bat
 ├── README.md
 ├── docs/
@@ -546,7 +548,17 @@ proto   := "tcp" | "udp" | "icmp" | "icmp6" | "ip" | "ipv4"
 - `tshark -X lua_script:wireshark/lab1a_stats.lua ...` 输出每条 `tcp.stream` 的包数、字节数、首末时间和消息类型计数。
 - GUI 中能看到 `LAB1A` 协议列、请求/应答/心跳三种底色，以及 `Tools -> LAB1A -> 流统计` 菜单；截图与命令输出写进报告。
 
-## 16. 已知取舍与风险
+## 16. 打包与部署（M8）
+
+- 目标：交付一个在目标 Windows 机器上不依赖 Python 环境的可执行程序。Npcap 驱动因为许可证和安装方式限制不打包，目标机需自行安装 Npcap 1.90（勾选 WinPcap 兼容模式）。
+- 工具与模式：PyInstaller 6.22.3，`--onedir --windowed`。选择 onedir 而不是 onefile：onefile 每次启动要把几百 MB 的 Qt 依赖解压到临时目录，启动慢，而且临时目录会影响 Qt 插件和 `wpcap.dll` 的搜索路径；onedir 结构稳定，便于排查缺失的 DLL。
+- 构建入口：`build.bat` 调用 `python -m PyInstaller ... main.py`，输出 `dist\Lab1A-Sniffer\Lab1A-Sniffer.exe`；`requirements-build.txt` 固定运行时依赖与 PyInstaller 版本。
+- 依赖裁剪：显式排除 `plotly`、`kaleido`、`pandas`、`matplotlib`、`scipy`、`IPython`、`jupyter`、`notebook`、`PyQt5`、`PyQt6`、`PySide2`、`tkinter`。本程序不使用这些库；开发机若安装过它们，PyInstaller 的依赖图会把可选库一起分析，实测会把构建时间从约 1 分钟拖到十几分钟。
+- 产物结构：`dist\Lab1A-Sniffer\` 下是 `Lab1A-Sniffer.exe` 和 `_internal\`，Python 运行时、PySide6 与 Qt 平台插件都在其中。分发时必须复制整个目录，不能只复制 exe。
+- 运行时依赖：目标机需要 Windows 10/11 x64 和 Npcap；没有 Npcap 时程序仍能启动，但会弹出「Npcap 未安装或不可用」提示并禁用抓包。
+- 已验证：打包后的 exe 正常启动并枚举网卡；在默认网卡上开始实时抓包后计数从 0 增长到 80 包，丢包计数保持 0；停止抓包和关闭窗口均正常。
+
+## 17. 已知取舍与风险
 
 - 不做 TCP 流重组：HTTP 分块、TLS 多记录跨包场景只解析单包可见部分；报告中说明。
 - WLAN 混杂模式在部分驱动上只收到本机流量；验收以实际可抓到的流量为准。
@@ -556,7 +568,7 @@ proto   := "tcp" | "udp" | "icmp" | "icmp6" | "ip" | "ipv4"
 - 流时序视图是表格+方向箭头，不是完整梯形图；对 1A 演示足够，但不如 Wireshark 的 TCP stream graph 完整。
 - Wireshark Lua API 在不同版本间有差异，以 4.6.9 实测为准；菜单类 API 不可用时退化为 `tshark -X lua_script` 脚本入口，功能不缩水。
 
-## 17. 报告大纲与提交清单
+## 18. 报告大纲与提交清单
 
 报告必须覆盖 PPT 明确要求的内容。提交不要求 README，设计与说明都写进报告；仓库内的 README 只保留最短运行步骤，不承载报告内容。
 

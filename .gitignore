@@ -10,3 +10,4 @@ venv/
 captures/
 *.pcap
 *.pcapng
+debug.log
